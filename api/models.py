@@ -5,13 +5,35 @@ import rethinkdb as r
 from jose import jwt, JWTError
 from flask import current_app
 
-from api.utils.errors import ValidationError
+from api.utils.errors import ValidationError, DatabaseProcessError
 
 conn = r.connect(db="papers")
 
 
 class RethinkDBModel(object):
-    pass
+    _table = None
+
+    @classmethod
+    def find(cls, id):
+        return r.table(cls._table).get(id).run(conn)
+
+    @classmethod
+    def filter(cls, predicate):
+        return list(r.table(cls._table).filter(predicate).run(conn))
+
+    @classmethod
+    def update(cls, id, fields):
+        status = r.table(cls._table).get(id).update(fields).run(conn)
+        if status['errors']:
+            raise DatabaseProcessError("Could not complete the update action")
+        return True
+
+    @classmethod
+    def delete(cls, id):
+        status = r.table(cls._table).get(id).delete().run(conn)
+        if status['errors']:
+            raise DatabaseProcessError("Could not complete the delete action")
+        return True
 
 
 class User(RethinkDBModel):
@@ -65,3 +87,44 @@ class User(RethinkDBModel):
     @staticmethod
     def verify_password(password, _hash):
         return pbkdf2_sha256.verify(password, _hash)
+
+
+class File(RethinkDBModel):
+    _table = 'files'
+
+    @classmethod
+    def create(cls, **kwargs):
+        name = kwargs.get("name")
+        size = kwargs.get("size")
+        uri = kwargs.get("uri")
+        parent = kwargs.get("parent")
+        creator = kwargs.get("creator")
+
+        # Direct parent ID
+        parent_id = '0' if parent is None else parent['id']
+        doc = {
+            'name': name,
+            'size': size,
+            'uri': uri,
+            'parent_id': parent_id,
+            'creator': creator,
+            'is_folder': False,
+            'status': True,
+            'date_created': datetime.now(r.make_timezone('+01:00')),
+            'date_modified': datetime.now(r.make_timezone('+01:00')),
+        }
+
+        res = r.table(cls._table).insert(doc).run(conn)
+        doc['id'] = res['generated_keys'][0]
+
+        if parent is not None:
+            Folder.add_object(parent, doc['id'])
+
+        return doc
+    
+    @classmethod
+    def move(cls, obj, to):
+        previous_folder_id = obj['parent_id']
+        previous_folder = Folder.find(previous_folder_id)
+        Folder.remove_object(previous_folder, obj['id'])
+        Folder.add_object(to, obj['id'])
